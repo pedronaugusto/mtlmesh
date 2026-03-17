@@ -2,8 +2,11 @@
 
 **CuMesh** is a GPU-accelerated library designed for high-performance 3D geometry processing directly within the PyTorch ecosystem. It provides efficient primitives for mesh cleaning, decimation, remeshing, and UV unwrapping.
 
+Originally developed by [Jianfeng Xiang](https://github.com/JeffreyXiang). This fork adds a **Metal backend** for native Apple Silicon support via Metal compute shaders. The backend is auto-selected at runtime.
+
 Key features include:
 *   **CUDA-Accelerated Mesh Operations**: Fast topology queries, simplification, hole filling, and cleaning.
+*   **Metal-Accelerated Mesh Operations** (macOS): Same operations on Apple Silicon via Metal compute shaders.
 *   **Remeshing**: Remesh arbitrary meshes using narrow-band UDF and Dual Contouring.
 *   **UV Unwrapping**: Efficient UV parameterization with `xatlas` enhenced by a fast mesh clustering on the GPU.
 
