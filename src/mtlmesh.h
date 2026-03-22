@@ -17,7 +17,7 @@ class MtlMesh {
 public:
     // Core geometry
     id<MTLBuffer> vertices;        // V * 12 bytes (packed_float3, 12-byte stride)
-    id<MTLBuffer> faces;           // F * 16 bytes (Metal int3, 16-byte stride)
+    id<MTLBuffer> faces;           // F * 12 bytes (packed_int3, 12-byte stride)
     int num_verts = 0;
     int num_fcs = 0;
 
@@ -149,13 +149,18 @@ public:
 private:
     id<MTLDevice> dev_;
 
+    // Backing tensors for zero-copy Metal buffers created during init().
+    // These keep the underlying memory alive for the lifetime of the MtlMesh.
+    torch::Tensor init_verts_backing_;
+    torch::Tensor init_faces_backing_;
+
     // Buffer helpers
     id<MTLBuffer> alloc(size_t bytes);
     id<MTLBuffer> alloc_zero(size_t bytes);
 
     // int3 stride conversion helpers (12-byte packed ↔ 16-byte Metal int3)
-    id<MTLBuffer> faces_from_tensor(const torch::Tensor& t);  // [F,3] int32 → F*16
-    torch::Tensor faces_to_tensor(id<MTLBuffer> buf, int F);  // F*16 → [F,3] int32
+    id<MTLBuffer> faces_from_tensor(const torch::Tensor& t);  // [F,3] int32 → F*12
+    torch::Tensor faces_to_tensor(id<MTLBuffer> buf, int F);  // F*12 → [F,3] int32
 
     // float3 helpers (packed_float3 is 12 bytes, matches [V,3] float32)
     id<MTLBuffer> verts_from_tensor(const torch::Tensor& t);  // [V,3] float32 → V*12

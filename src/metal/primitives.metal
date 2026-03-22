@@ -210,11 +210,11 @@ kernel void segmented_reduce_sum_float3(
 kernel void rle_mark_transitions(
     device const int* sorted_keys [[buffer(0)]],
     constant int& N [[buffer(1)]],
-    device int* is_start [[buffer(2)]],  // 1 if this element starts a new run
+    device int* is_transition [[buffer(2)]],  // 1 if key differs from previous (0 for first element)
     uint tid [[thread_position_in_grid]]
 ) {
     if (tid >= (uint)N) return;
-    is_start[tid] = (tid == 0 || sorted_keys[tid] != sorted_keys[tid - 1]) ? 1 : 0;
+    is_transition[tid] = (tid > 0 && sorted_keys[tid] != sorted_keys[tid - 1]) ? 1 : 0;
 }
 
 // After prefix-summing is_start, extract unique keys and run lengths

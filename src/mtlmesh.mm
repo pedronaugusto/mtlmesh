@@ -3,6 +3,7 @@
 // Zero PyTorch in the GPU path. All data lives in id<MTLBuffer> StorageModeShared.
 #import "mtlmesh.h"
 #import <torch/torch.h>
+#include <unistd.h>
 
 namespace mtlmesh {
 
@@ -24,12 +25,28 @@ id<MTLBuffer> MtlMesh::alloc_zero(size_t bytes) {
     return buf;
 }
 
-// faces: [F,3] int32 (12 bytes/row) → Metal packed_int3 (12 bytes/row) — direct memcpy
+// faces: [F,3] int32 (12 bytes/row) → Metal packed_int3 (12 bytes/row)
+// Zero-copy when page-aligned; backing tensor stored in init_faces_backing_.
 id<MTLBuffer> MtlMesh::faces_from_tensor(const torch::Tensor& t) {
     int F = (int)t.size(0);
-    auto buf = alloc(F * 12);
+    size_t bytes = (size_t)F * 12;
     auto tc = t.cpu().contiguous().to(torch::kInt32);
-    memcpy([buf contents], tc.data_ptr<int>(), F * 12);
+    void* ptr = tc.data_ptr<int>();
+    // Try zero-copy: requires page-aligned pointer and size
+    size_t page = sysconf(_SC_PAGESIZE);
+    if (((uintptr_t)ptr % page) == 0 && (bytes % page) == 0) {
+        auto buf = [dev_ newBufferWithBytesNoCopy:ptr
+                                           length:bytes
+                                          options:MTLResourceStorageModeShared
+                                      deallocator:nil];
+        if (buf) {
+            init_faces_backing_ = tc;  // prevent deallocation
+            return buf;
+        }
+    }
+    // Fallback: alloc + memcpy
+    auto buf = alloc(bytes);
+    memcpy([buf contents], ptr, bytes);
     return buf;
 }
 
@@ -41,11 +58,27 @@ torch::Tensor MtlMesh::faces_to_tensor(id<MTLBuffer> buf, int F) {
 }
 
 // [V,3] float32 → V*12 bytes (packed_float3 is 12 bytes, matches directly)
+// Zero-copy when page-aligned; backing tensor stored in init_verts_backing_.
 id<MTLBuffer> MtlMesh::verts_from_tensor(const torch::Tensor& t) {
     int N = (int)t.size(0);
-    auto buf = alloc(N * 12);
+    size_t bytes = (size_t)N * 12;
     auto tc = t.cpu().contiguous().to(torch::kFloat32);
-    memcpy([buf contents], tc.data_ptr<float>(), N * 12);
+    void* ptr = tc.data_ptr<float>();
+    // Try zero-copy: requires page-aligned pointer and size
+    size_t page = sysconf(_SC_PAGESIZE);
+    if (((uintptr_t)ptr % page) == 0 && (bytes % page) == 0) {
+        auto buf = [dev_ newBufferWithBytesNoCopy:ptr
+                                           length:bytes
+                                          options:MTLResourceStorageModeShared
+                                      deallocator:nil];
+        if (buf) {
+            init_verts_backing_ = tc;  // prevent deallocation
+            return buf;
+        }
+    }
+    // Fallback: alloc + memcpy
+    auto buf = alloc(bytes);
+    memcpy([buf contents], ptr, bytes);
     return buf;
 }
 
@@ -61,10 +94,12 @@ torch::Tensor MtlMesh::int2_to_tensor(id<MTLBuffer> buf, int N) {
     return t;
 }
 
+// NOTE: Currently unused. If used with zero-copy, the caller must retain
+// the backing tensor externally — this function does not store it.
 id<MTLBuffer> MtlMesh::ints_from_tensor(const torch::Tensor& t) {
-    int N = (int)t.numel();
-    auto buf = alloc(N * 4);
     auto tc = t.cpu().contiguous().to(torch::kInt32);
+    int N = (int)tc.numel();
+    auto buf = alloc(N * 4);
     memcpy([buf contents], tc.data_ptr<int>(), N * 4);
     return buf;
 }
@@ -722,6 +757,8 @@ void MtlMesh::remove_unreferenced_vertices() {
     }
 
     vertices = new_verts;
+    // faces buffer is reused (indices remapped in-place), but if it was
+    // zero-copy the underlying tensor data was mutated directly — safe.
     num_verts = new_V;
     clear_cache();
 }

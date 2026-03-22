@@ -20,27 +20,85 @@ id<MTLBuffer> MetalPrimitives::temp_buffer(size_t bytes) {
 
 void MetalPrimitives::exclusive_sum(id<MTLBuffer> data, int N) {
     if (N <= 0) return;
-    // CPU sequential scan — zero-copy on Apple Silicon shared memory.
-    // ExclusiveSum: output[i] = sum of input[0..i-1].
-    int* d = (int*)[data contents];
-    int sum = 0;
-    for (int i = 0; i < N; i++) {
-        int val = d[i];
-        d[i] = sum;
-        sum += val;
+
+    auto& ctx = MetalContext::instance();
+    int block_size = 1024;
+
+    if (N <= block_size) {
+        // Single threadgroup GPU Blelloch scan
+        auto block_sums = temp_buffer(sizeof(int));
+        memset([block_sums contents], 0, sizeof(int));
+
+        auto pso = ctx.pipeline("prefix_sum_threadgroup_int");
+        id<MTLCommandBuffer> cmdBuf = [ctx.queue() commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:data offset:0 atIndex:0];
+        [enc setBuffer:block_sums offset:0 atIndex:1];
+        int n_val = N;
+        [enc setBytes:&n_val length:sizeof(int) atIndex:2];
+        // Round up to next power of 2 for Blelloch scan
+        NSUInteger po2 = 1;
+        while (po2 < (NSUInteger)N) po2 <<= 1;
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(po2, 1, 1)];
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+        return;
     }
+
+    // Multi-block: scan each block, scan block sums recursively, propagate offsets
+    int num_blocks = (N + block_size - 1) / block_size;
+
+    auto block_sums_buf = temp_buffer(num_blocks * sizeof(int));
+    memset([block_sums_buf contents], 0, num_blocks * sizeof(int));
+
+    // Step 1: per-block prefix scan (each block produces its local exclusive sum + block total)
+    auto pso = ctx.pipeline("prefix_sum_threadgroup_int");
+    int n_val = N;
+    id<MTLCommandBuffer> cmdBuf = [ctx.queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    [enc setBuffer:data offset:0 atIndex:0];
+    [enc setBuffer:block_sums_buf offset:0 atIndex:1];
+    [enc setBytes:&n_val length:sizeof(int) atIndex:2];
+    [enc dispatchThreadgroups:MTLSizeMake(num_blocks, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+
+    // Step 2: recursively scan block sums
+    exclusive_sum(block_sums_buf, num_blocks);
+
+    // Step 3: add block offsets to each element
+    // MUST use same threadgroup size as the scan (block_size) so gid matches
+    auto pso2 = ctx.pipeline("add_block_offsets_int");
+    cmdBuf = [ctx.queue() commandBuffer];
+    enc = [cmdBuf computeCommandEncoder];
+    [enc setComputePipelineState:pso2];
+    [enc setBuffer:data offset:0 atIndex:0];
+    [enc setBuffer:block_sums_buf offset:0 atIndex:1];
+    [enc setBytes:&n_val length:sizeof(int) atIndex:2];
+    [enc dispatchThreadgroups:MTLSizeMake(num_blocks, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
 }
 
 void MetalPrimitives::inclusive_sum(id<MTLBuffer> data, int N) {
     if (N <= 0) return;
-    // Convert to exclusive scan + add original values
-    // For simplicity and correctness, use CPU path
+    // Save original values, run GPU exclusive sum, add originals back
+    auto backup = temp_buffer(N * sizeof(int));
+    memcpy([backup contents], [data contents], N * sizeof(int));
+    exclusive_sum(data, N);
+    // inclusive[i] = exclusive[i] + original[i]
+    // CPU add — small cost relative to the scan itself
     int* d = (int*)[data contents];
-    int sum = 0;
-    for (int i = 0; i < N; i++) {
-        sum += d[i];
-        d[i] = sum;
-    }
+    int* b = (int*)[backup contents];
+    for (int i = 0; i < N; i++) d[i] += b[i];
 }
 
 // ========== Stream Compaction ==========
@@ -224,20 +282,56 @@ int MetalPrimitives::run_length_encode(id<MTLBuffer> sorted_keys, id<MTLBuffer> 
                                         id<MTLBuffer> counts, int N) {
     if (N <= 0) return 0;
 
-    int* sk = (int*)[sorted_keys contents];
-    int* uk = (int*)[unique_keys contents];
-    int* cnt = (int*)[counts contents];
-
-    int num_runs = 0;
-    for (int i = 0; i < N; ) {
-        int key = sk[i];
-        int run_len = 1;
-        while (i + run_len < N && sk[i + run_len] == key) run_len++;
-        uk[num_runs] = key;
-        cnt[num_runs] = run_len;
-        num_runs++;
-        i += run_len;
+    // CPU path for tiny arrays — avoids GPU dispatch overhead
+    if (N <= 256) {
+        int* sk = (int*)[sorted_keys contents];
+        int* uk = (int*)[unique_keys contents];
+        int* cnt = (int*)[counts contents];
+        int num_runs = 0;
+        for (int i = 0; i < N; ) {
+            int key = sk[i];
+            int run_len = 1;
+            while (i + run_len < N && sk[i + run_len] == key) run_len++;
+            uk[num_runs] = key;
+            cnt[num_runs] = run_len;
+            num_runs++;
+            i += run_len;
+        }
+        return num_runs;
     }
+
+    auto& ctx = MetalContext::instance();
+
+    // Step 1: mark transitions (is_transition[i] = 1 if key[i] != key[i-1], 0 for first element)
+    auto is_transition = temp_buffer(N * sizeof(int));
+    ctx.dispatch("rle_mark_transitions", [&](id<MTLComputeCommandEncoder> enc) {
+        [enc setBuffer:sorted_keys offset:0 atIndex:0];
+        int n_val = N;
+        [enc setBytes:&n_val length:sizeof(int) atIndex:1];
+        [enc setBuffer:is_transition offset:0 atIndex:2];
+    }, N);
+
+    // Step 2: inclusive prefix sum → run IDs (0-indexed)
+    // inclusive_sum([0,0,0,1,0,1]) = [0,0,0,1,1,2] — correct run IDs
+    auto run_ids = temp_buffer(N * sizeof(int));
+    memcpy([run_ids contents], [is_transition contents], N * sizeof(int));
+    inclusive_sum(run_ids, N);
+
+    // Number of runs = last run ID + 1
+    int* run_ids_ptr = (int*)[run_ids contents];
+    int num_runs = run_ids_ptr[N - 1] + 1;
+
+    // Step 3: extract unique keys and accumulate run lengths (atomic)
+    memset([counts contents], 0, num_runs * sizeof(int));
+    ctx.dispatch("rle_extract", [&](id<MTLComputeCommandEncoder> enc) {
+        [enc setBuffer:sorted_keys offset:0 atIndex:0];
+        [enc setBuffer:run_ids offset:0 atIndex:1];
+        int n_val = N;
+        [enc setBytes:&n_val length:sizeof(int) atIndex:2];
+        [enc setBuffer:unique_keys offset:0 atIndex:3];
+        [enc setBuffer:counts offset:0 atIndex:4];
+    }, N);
+
     return num_runs;
 }
 
