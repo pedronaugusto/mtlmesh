@@ -693,21 +693,32 @@ void MtlMesh::get_boundary_loops() {
 void MtlMesh::remove_faces(torch::Tensor& face_mask) {
     // face_mask is bool tensor; keep faces where mask is true
     auto mask_cpu = face_mask.cpu().to(torch::kBool).contiguous();
+    TORCH_CHECK((int)mask_cpu.numel() == num_fcs,
+                "remove_faces: face_mask has ", mask_cpu.numel(),
+                " entries but mesh has ", num_fcs, " faces");
     auto* m = mask_cpu.data_ptr<bool>();
     int F = num_fcs;
+    int V = num_verts;
 
     int new_F = 0;
     for (int i = 0; i < F; i++) if (m[i]) new_F++;
 
-    auto new_faces = alloc(new_F * 12);
+    auto new_faces = alloc((size_t)new_F * 12);
     auto* src = PTR<int>(faces);
     auto* dst = PTR<int>(new_faces);
     int idx = 0;
     for (int i = 0; i < F; i++) {
         if (m[i]) {
-            dst[idx*3+0] = src[i*3+0];
-            dst[idx*3+1] = src[i*3+1];
-            dst[idx*3+2] = src[i*3+2];
+            // Validate face vertex indices before copy — upstream producers
+            // have been observed to emit out-of-range indices on pathological
+            // meshes, which previously segfaulted remove_unreferenced_vertices.
+            int a = src[i*3+0], b = src[i*3+1], c = src[i*3+2];
+            TORCH_CHECK(a >= 0 && a < V && b >= 0 && b < V && c >= 0 && c < V,
+                        "remove_faces: face ", i, " has vertex index out of range (",
+                        a, ", ", b, ", ", c, ") for V=", V);
+            dst[idx*3+0] = a;
+            dst[idx*3+1] = b;
+            dst[idx*3+2] = c;
             idx++;
         }
     }
@@ -724,9 +735,14 @@ void MtlMesh::remove_unreferenced_vertices() {
     std::vector<uint8_t> ref(V, 0);
     auto* fp = PTR<int>(faces);
     for (int i = 0; i < F; i++) {
-        ref[fp[i*3+0]] = 1;
-        ref[fp[i*3+1]] = 1;
-        ref[fp[i*3+2]] = 1;
+        int a = fp[i*3+0], b = fp[i*3+1], c = fp[i*3+2];
+        TORCH_CHECK(a >= 0 && a < V && b >= 0 && b < V && c >= 0 && c < V,
+                    "remove_unreferenced_vertices: face ", i,
+                    " has vertex index out of range (", a, ", ", b, ", ", c,
+                    ") for V=", V);
+        ref[a] = 1;
+        ref[b] = 1;
+        ref[c] = 1;
     }
 
     // Build remap
@@ -954,6 +970,19 @@ void MtlMesh::fill_holes(float max_hole_perimeter) {
     }
     if (fill_loops.empty()) return;
 
+    // Bounds-check every offset we're about to index. Upstream get_boundary_loops
+    // is expected to produce monotonically non-decreasing offsets in [0, L],
+    // but a corrupt loop_boundaries_offset was the proximate cause of a
+    // segfault in the decoder output post-process.
+    for (int loop_id : fill_loops) {
+        TORCH_CHECK(loop_id >= 0 && loop_id < num_loops,
+                    "fill_holes: loop_id ", loop_id, " out of range [0, ", num_loops, ")");
+        int s = offsets[loop_id], e = offsets[loop_id + 1];
+        TORCH_CHECK(s >= 0 && e >= s && e <= L,
+                    "fill_holes: offsets[", loop_id, "..", loop_id + 1, "] = (",
+                    s, ", ", e, ") out of range [0, ", L, "]");
+    }
+
     // Compute midpoints for center vertices
     auto midpoints = alloc(L * 12);
     CTX.dispatch("compute_loop_boundary_midpoints_kernel", [&](id<MTLComputeCommandEncoder> enc) {
@@ -964,10 +993,16 @@ void MtlMesh::fill_holes(float max_hole_perimeter) {
         [enc setBuffer:midpoints offset:0 atIndex:4];
     }, L);
 
-    // For each loop to fill: add a center vertex, create fan triangles
-    int total_new_faces = 0;
+    // For each loop to fill: add a center vertex, create fan triangles.
+    // Saturating int64 accumulation — a corrupt offsets array can otherwise
+    // overflow int32 and flip the sign, producing a negative-sized alloc.
+    int64_t total_new_faces_64 = 0;
     for (int loop_id : fill_loops)
-        total_new_faces += offsets[loop_id + 1] - offsets[loop_id];
+        total_new_faces_64 += (int64_t)(offsets[loop_id + 1] - offsets[loop_id]);
+    TORCH_CHECK(total_new_faces_64 >= 0 && total_new_faces_64 <= (int64_t)(INT_MAX / 12),
+                "fill_holes: total_new_faces ", total_new_faces_64,
+                " overflows safe alloc range");
+    int total_new_faces = (int)total_new_faces_64;
 
     // Compute center vertices by averaging midpoints per loop (CPU)
     int num_new_verts = (int)fill_loops.size();
@@ -991,18 +1026,27 @@ void MtlMesh::fill_holes(float max_hole_perimeter) {
     }
 
     // Build new faces: for each edge in each loop, create triangle (e0, e1, center)
-    auto new_faces_buf = alloc(total_new_faces * 12);
+    auto new_faces_buf = alloc((size_t)total_new_faces * 12);
     auto* nf_ptr = PTR<int>(new_faces_buf);
     auto* lb = PTR<int>(loop_boundaries);
     auto* ep = PTR<uint64_t>(edges);
     int fi = 0;
+    int E = num_edges_;
+    int V = num_verts;
     for (int ci = 0; ci < num_new_verts; ci++) {
         int li = fill_loops[ci];
         int center_vid = num_verts + ci;
         for (int j = offsets[li]; j < offsets[li + 1]; j++) {
-            uint64_t e = ep[lb[j]];
+            int eidx = lb[j];
+            TORCH_CHECK(eidx >= 0 && eidx < E,
+                        "fill_holes: loop_boundaries[", j, "] = ", eidx,
+                        " out of range [0, ", E, ")");
+            uint64_t e = ep[eidx];
             int e0 = (int)(e & 0xFFFFFFFF);
             int e1 = (int)(e >> 32);
+            TORCH_CHECK(e0 >= 0 && e0 < V && e1 >= 0 && e1 < V,
+                        "fill_holes: edge ", eidx, " has vertex index out of range (",
+                        e0, ", ", e1, ") for V=", V);
             nf_ptr[fi*3+0] = e0;
             nf_ptr[fi*3+1] = e1;
             nf_ptr[fi*3+2] = center_vid;
@@ -1109,7 +1153,13 @@ void MtlMesh::unify_face_orientations() {
     auto* cids = PTR<int>(comp_ids);
     for (int i = 0; i < F; i++) cids[i] = i << 1;  // id=i, flip=0
 
+    // Union-find over F components converges in O(log F) rounds under the
+    // "hook-then-compress" pattern. Hard-cap at 64 iterations: well above the
+    // theoretical bound (log2(2^31) = 31) and defensive against pathological
+    // input where the kernel doesn't monotonically reduce component count.
+    static constexpr int kMaxIters = 64;
     auto end_flag = alloc(4);
+    int iter = 0;
     while (true) {
         PTR<int>(end_flag)[0] = 1;
 
@@ -1127,6 +1177,12 @@ void MtlMesh::unify_face_orientations() {
         }, F);
 
         if (PTR<int>(end_flag)[0] == 1) break;
+        if (++iter >= kMaxIters) {
+            TORCH_WARN("unify_face_orientations: union-find did not converge in ",
+                       kMaxIters, " iterations (F=", F, ", M=", M,
+                       "); aborting, mesh orientations may be partially unified");
+            break;
+        }
     }
 
     // Step 3: Flip faces where flip bit is set
@@ -1217,15 +1273,21 @@ std::tuple<int, int> MtlMesh::simplify_step(float lambda_edge_length, float lamb
     // maps removed vertices to same index as next kept vertex, which is what
     // the compress step relies on for parallel collapse races).
 
-    auto vert_map_buf = alloc((V + 1) * 4);
-    memcpy([vert_map_buf contents], [vert_kept contents], V * 4);
+    // (V+1)*4 and (F+1)*4 — guard against sign-flip on meshes near INT_MAX.
+    TORCH_CHECK((int64_t)(V + 1) * 4 <= (int64_t)INT_MAX,
+                "simplify_step: (V+1)*4 overflows (V=", V, ")");
+    TORCH_CHECK((int64_t)(F + 1) * 4 <= (int64_t)INT_MAX,
+                "simplify_step: (F+1)*4 overflows (F=", F, ")");
+
+    auto vert_map_buf = alloc((size_t)(V + 1) * 4);
+    memcpy([vert_map_buf contents], [vert_kept contents], (size_t)V * 4);
     PTR<int>(vert_map_buf)[V] = 0;
     PRIMS.exclusive_sum(vert_map_buf, V + 1);
     auto* vert_map = PTR<int>(vert_map_buf);
     int new_V = vert_map[V];
 
-    auto face_map_buf = alloc((F + 1) * 4);
-    memcpy([face_map_buf contents], [face_kept contents], F * 4);
+    auto face_map_buf = alloc((size_t)(F + 1) * 4);
+    memcpy([face_map_buf contents], [face_kept contents], (size_t)F * 4);
     PTR<int>(face_map_buf)[F] = 0;
     PRIMS.exclusive_sum(face_map_buf, F + 1);
     auto* face_map = PTR<int>(face_map_buf);
@@ -1246,16 +1308,20 @@ std::tuple<int, int> MtlMesh::simplify_step(float lambda_edge_length, float lamb
 
     // Compress faces:
     // new_faces[face_map[i]] = { vert_map[old_faces[i].x/y/z] }
-    auto new_faces = alloc(new_F * 12);
+    auto new_faces = alloc((size_t)new_F * 12);
     auto* fsrc = PTR<int>(faces);
     auto* fdst = PTR<int>(new_faces);
     for (int i = 0; i < F; i++) {
         int new_id = face_map[i];
         int is_kept = face_map[i + 1] == new_id + 1;
         if (is_kept) {
-            fdst[new_id*3+0] = vert_map[fsrc[i*3+0]];
-            fdst[new_id*3+1] = vert_map[fsrc[i*3+1]];
-            fdst[new_id*3+2] = vert_map[fsrc[i*3+2]];
+            int a = fsrc[i*3+0], b = fsrc[i*3+1], c = fsrc[i*3+2];
+            TORCH_CHECK(a >= 0 && a < V && b >= 0 && b < V && c >= 0 && c < V,
+                        "simplify_step: face ", i, " has vertex index out of range (",
+                        a, ", ", b, ", ", c, ") for V=", V);
+            fdst[new_id*3+0] = vert_map[a];
+            fdst[new_id*3+1] = vert_map[b];
+            fdst[new_id*3+2] = vert_map[c];
         }
     }
 
