@@ -166,7 +166,12 @@ def remesh_narrow_band_dc(
         *hashmap_vox, connected_voxel_hash_key,
         resolution, resolution, resolution
     ).reshape(M, 4).int()
-    connected_voxel_valid = (connected_voxel_indices != 0xffffffff).all(dim=1)
+    # 0xffffffff ("no voxel") is -1 once narrowed to int32 above, so a real
+    # index is always >= 0. Test the sign, not the sentinel value: MPS does not
+    # wrap an out-of-range Python scalar into the tensor's dtype the way CPU
+    # and CUDA do, so `!= 0xffffffff` matches nothing there. Correct today only
+    # because this lookup returns a CPU tensor.
+    connected_voxel_valid = (connected_voxel_indices >= 0).all(dim=1)
     quad_indices = connected_voxel_indices[connected_voxel_valid].int()
     intersected_dir = intersected[connected_voxel_valid].int()
     L = quad_indices.shape[0]

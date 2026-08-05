@@ -197,7 +197,10 @@ def remesh_narrow_band_dc(
         connected_voxel.reshape(-1, 3)
     ], dim=1)
     connected_voxel_indices = _C.hashmap_lookup_3d_cuda(*hashmap_vox, connected_voxel_hash_key, resolution, resolution, resolution).reshape(M, 4).int()
-    connected_voxel_valid = (connected_voxel_indices != 0xffffffff).all(dim=1)
+    # 0xffffffff ("no voxel") is -1 once narrowed to int32 above, so a real
+    # index is always >= 0. Equivalent here (this path is CUDA-only) and robust
+    # if it ever runs on a backend that does not wrap out-of-range scalars.
+    connected_voxel_valid = (connected_voxel_indices >= 0).all(dim=1)
     quad_indices = connected_voxel_indices[connected_voxel_valid].int()                             # (L, 4)
     intersected_dir = intersected[connected_voxel_valid].int()
     L = quad_indices.shape[0]
