@@ -83,7 +83,7 @@ This package builds upon and integrates code from several excellent open-source 
 ## Apple-Silicon follow-ups
 
 Cross-repo follow-up work (deferred mtlgemm perf items, fp16/bf16 shader
-specializations, universal tiled sparse attention, etc.) is tracked in
-`/Users/gusto/work/ai/FOLLOWUPS.md` alongside the four `mtl*` repos. If
-you touch any of them, update that file — it's the single source of truth
-for what's intentionally deferred vs what's still broken.
+specializations, universal tiled sparse attention, etc.) is tracked in this
+repo's GitHub issues. Bug reports and PRs are welcome on any of the four
+`mtl*` repos — mtlbvh, mtlgemm, mtlmesh and mtldiffrast — and on
+trellis2-apple, which depends on all of them.

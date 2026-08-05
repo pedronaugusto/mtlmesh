@@ -4,6 +4,8 @@
 #import "mtlmesh.h"
 #import <torch/torch.h>
 #include <unistd.h>
+#include <cstdlib>
+#include <string>
 
 namespace mtlmesh {
 
@@ -13,19 +15,38 @@ namespace mtlmesh {
 
 template<typename T> static inline T* PTR(id<MTLBuffer> buf) { return (T*)[buf contents]; }
 
+// Apple7/8 (M1/M2) lack the 64-bit atomic_min used by propagate_cost_kernel and
+// the native float atomics used by get_chart_edge_cnt_kernel_native, so those
+// GPUs take emulated fallbacks. The fallbacks are therefore dead code on
+// Apple9+, i.e. exactly the machines most likely to run the test suite.
+// MTLMESH_FORCE_LEGACY_ATOMICS=1 forces the fallback path on any GPU so the
+// M1/M2 code is reachable in CI and in local parity tests. It only ever selects
+// a *more* conservative kernel, so it is safe to set anywhere.
+static bool force_legacy_atomics() {
+    static const bool forced = [] {
+        const char* e = std::getenv("MTLMESH_FORCE_LEGACY_ATOMICS");
+        return e && *e && std::string(e) != "0";
+    }();
+    return forced;
+}
+
 static const char* chart_edge_count_kernel_name(id<MTLDevice> device) {
-    if (@available(macOS 14.0, *)) {
-        if ([device supportsFamily:MTLGPUFamilyApple9]) {
-            return "get_chart_edge_cnt_kernel_native";
+    if (!force_legacy_atomics()) {
+        if (@available(macOS 14.0, *)) {
+            if ([device supportsFamily:MTLGPUFamilyApple9]) {
+                return "get_chart_edge_cnt_kernel_native";
+            }
         }
     }
     return "get_chart_edge_cnt_kernel";
 }
 
 static const char* simplify_propagate_kernel_name(id<MTLDevice> device) {
-    if (@available(macOS 14.0, *)) {
-        if ([device supportsFamily:MTLGPUFamilyApple9]) {
-            return "propagate_cost_kernel";
+    if (!force_legacy_atomics()) {
+        if (@available(macOS 14.0, *)) {
+            if ([device supportsFamily:MTLGPUFamilyApple9]) {
+                return "propagate_cost_kernel";
+            }
         }
     }
     return "propagate_cost_per_face_kernel";
