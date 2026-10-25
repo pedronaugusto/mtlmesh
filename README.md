@@ -14,6 +14,7 @@ Key features include:
 
 ### Prerequisites
 *   Python >= 3.8
+*   macOS >= 14 on Apple Silicon (Metal backend)
 *   PyTorch >= 2.4 (with CUDA support)
 *   CUDA Toolkit >= 12.4 (matching your PyTorch version)
 

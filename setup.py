@@ -55,7 +55,9 @@ class MetalBuildExt(_build_ext):
                 subprocess.check_call([
                     "xcrun", "-sdk", "macosx", "metal",
                     "-c", mf, "-o", air,
-                    "-std=metal4.0", "-O2",
+                    # Metal 3.1 / macOS 14 is the oldest target the kernels build for (bfloat needs 3.1).
+                    # Without the min-version flag the AIR is stamped with the SDK's macOS version.
+                    "-std=metal3.1", "-mmacosx-version-min=14.0", "-O2",
                     "-D__HAVE_ATOMIC_ULONG__=1",
                     "-D__HAVE_ATOMIC_ULONG_MIN_MAX__=1",
                     "-I", metal_dir,
