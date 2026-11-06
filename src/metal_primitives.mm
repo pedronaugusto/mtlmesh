@@ -30,21 +30,23 @@ void MetalPrimitives::exclusive_sum(id<MTLBuffer> data, int N) {
         memset([block_sums contents], 0, sizeof(int));
 
         auto pso = ctx.pipeline("prefix_sum_threadgroup_int");
-        id<MTLCommandBuffer> cmdBuf = [ctx.queue() commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-        [enc setComputePipelineState:pso];
-        [enc setBuffer:data offset:0 atIndex:0];
-        [enc setBuffer:block_sums offset:0 atIndex:1];
-        int n_val = N;
-        [enc setBytes:&n_val length:sizeof(int) atIndex:2];
-        // Round up to next power of 2 for Blelloch scan
-        NSUInteger po2 = 1;
-        while (po2 < (NSUInteger)N) po2 <<= 1;
-        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(po2, 1, 1)];
-        [enc endEncoding];
-        [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmdBuf = [ctx.queue() commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+            [enc setComputePipelineState:pso];
+            [enc setBuffer:data offset:0 atIndex:0];
+            [enc setBuffer:block_sums offset:0 atIndex:1];
+            int n_val = N;
+            [enc setBytes:&n_val length:sizeof(int) atIndex:2];
+            // Round up to next power of 2 for Blelloch scan
+            NSUInteger po2 = 1;
+            while (po2 < (NSUInteger)N) po2 <<= 1;
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(po2, 1, 1)];
+            [enc endEncoding];
+            [cmdBuf commit];
+            [cmdBuf waitUntilCompleted];
+        }
         return;
     }
 
@@ -57,17 +59,19 @@ void MetalPrimitives::exclusive_sum(id<MTLBuffer> data, int N) {
     // Step 1: per-block prefix scan (each block produces its local exclusive sum + block total)
     auto pso = ctx.pipeline("prefix_sum_threadgroup_int");
     int n_val = N;
-    id<MTLCommandBuffer> cmdBuf = [ctx.queue() commandBuffer];
-    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-    [enc setComputePipelineState:pso];
-    [enc setBuffer:data offset:0 atIndex:0];
-    [enc setBuffer:block_sums_buf offset:0 atIndex:1];
-    [enc setBytes:&n_val length:sizeof(int) atIndex:2];
-    [enc dispatchThreadgroups:MTLSizeMake(num_blocks, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
-    [enc endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = [ctx.queue() commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:data offset:0 atIndex:0];
+        [enc setBuffer:block_sums_buf offset:0 atIndex:1];
+        [enc setBytes:&n_val length:sizeof(int) atIndex:2];
+        [enc dispatchThreadgroups:MTLSizeMake(num_blocks, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
 
     // Step 2: recursively scan block sums
     exclusive_sum(block_sums_buf, num_blocks);
@@ -75,17 +79,19 @@ void MetalPrimitives::exclusive_sum(id<MTLBuffer> data, int N) {
     // Step 3: add block offsets to each element
     // MUST use same threadgroup size as the scan (block_size) so gid matches
     auto pso2 = ctx.pipeline("add_block_offsets_int");
-    cmdBuf = [ctx.queue() commandBuffer];
-    enc = [cmdBuf computeCommandEncoder];
-    [enc setComputePipelineState:pso2];
-    [enc setBuffer:data offset:0 atIndex:0];
-    [enc setBuffer:block_sums_buf offset:0 atIndex:1];
-    [enc setBytes:&n_val length:sizeof(int) atIndex:2];
-    [enc dispatchThreadgroups:MTLSizeMake(num_blocks, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
-    [enc endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = [ctx.queue() commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+        [enc setComputePipelineState:pso2];
+        [enc setBuffer:data offset:0 atIndex:0];
+        [enc setBuffer:block_sums_buf offset:0 atIndex:1];
+        [enc setBytes:&n_val length:sizeof(int) atIndex:2];
+        [enc dispatchThreadgroups:MTLSizeMake(num_blocks, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(block_size, 1, 1)];
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
 }
 
 void MetalPrimitives::inclusive_sum(id<MTLBuffer> data, int N) {
