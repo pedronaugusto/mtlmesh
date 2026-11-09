@@ -80,18 +80,20 @@ void MetalContext::dispatch(const std::string& kernel_name,
     NSUInteger maxThreads = [pso maxTotalThreadsPerThreadgroup];
     NSUInteger threadGroupSize = std::min((NSUInteger)256, maxThreads);
 
-    id<MTLCommandBuffer> cmdBuf = [queue_ commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    [encoder setComputePipelineState:pso];
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = [queue_ commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
 
-    encode(encoder);
+        encode(encoder);
 
-    MTLSize gridSize = MTLSizeMake(thread_count, 1, 1);
-    MTLSize groupSize = MTLSizeMake(threadGroupSize, 1, 1);
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
-    [encoder endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+        MTLSize gridSize = MTLSizeMake(thread_count, 1, 1);
+        MTLSize groupSize = MTLSizeMake(threadGroupSize, 1, 1);
+        [encoder dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
+        [encoder endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
 }
 
 void MetalContext::dispatch2d(const std::string& kernel_name,
@@ -101,24 +103,28 @@ void MetalContext::dispatch2d(const std::string& kernel_name,
 
     auto pso = pipeline(kernel_name);
 
-    id<MTLCommandBuffer> cmdBuf = [queue_ commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
-    [encoder setComputePipelineState:pso];
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = [queue_ commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
 
-    encode(encoder);
+        encode(encoder);
 
-    MTLSize gridSize = MTLSizeMake(width, height, 1);
-    MTLSize groupSize = MTLSizeMake(8, 8, 1);
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
-    [encoder endEncoding];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+        MTLSize gridSize = MTLSizeMake(width, height, 1);
+        MTLSize groupSize = MTLSizeMake(8, 8, 1);
+        [encoder dispatchThreads:gridSize threadsPerThreadgroup:groupSize];
+        [encoder endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
 }
 
 void MetalContext::synchronize() {
-    id<MTLCommandBuffer> cmdBuf = [queue_ commandBuffer];
-    [cmdBuf commit];
-    [cmdBuf waitUntilCompleted];
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = [queue_ commandBuffer];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
 }
 
 } // namespace mtlmesh
