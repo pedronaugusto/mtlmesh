@@ -33,6 +33,30 @@ def _detect_backend():
 BACKEND = _detect_backend()
 
 
+def _drop_missing_sysroot(compiler):
+    """Drop -isysroot flags that name an SDK which no longer exists.
+
+    Python records the SDK it was built with and passes it to every extension
+    build. After an Xcode update that path can be gone, which breaks C++
+    linking. Without the flag, the compiler uses the currently selected SDK.
+    """
+    for name in ("compiler", "compiler_so", "compiler_cxx", "compiler_so_cxx",
+                 "linker_so", "linker_so_cxx", "linker_exe", "preprocessor"):
+        args = getattr(compiler, name, None)
+        if not isinstance(args, list) or "-isysroot" not in args:
+            continue
+        cleaned = []
+        flags = iter(args)
+        for flag in flags:
+            if flag != "-isysroot":
+                cleaned.append(flag)
+                continue
+            path = next(flags, None)
+            if path is not None and os.path.isdir(path):
+                cleaned += [flag, path]
+        setattr(compiler, name, cleaned)
+
+
 # =============================================================================
 # Metal backend
 # =============================================================================
@@ -40,6 +64,8 @@ class MetalBuildExt(_build_ext):
     """Compiles .metal shaders → .metallib, then builds Obj-C++ extension."""
 
     def build_extensions(self):
+        _drop_missing_sysroot(self.compiler)
+
         # Register .mm as valid source extension
         self.compiler.src_extensions.append(".mm")
 
